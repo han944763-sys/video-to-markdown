@@ -24,6 +24,10 @@ public sealed class Work
     public string? TaskId { get; set; }
     public string? MarkdownPath { get; set; }
     public string? Error { get; set; }
+    public CommentState CommentStatus { get; set; }
+    public int CommentCount { get; set; }
+    public string? CommentNotice { get; set; }
+    public string DisplayDetails => string.Join(" · ", new[] { Error, CommentNotice }.Where(value => !string.IsNullOrEmpty(value)));
 
     public string PlatformName => Platform switch
     {

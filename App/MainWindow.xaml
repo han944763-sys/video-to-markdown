@@ -93,6 +93,12 @@
                 </StackPanel>
             </Grid>
         </Border>
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="2,0,0,12">
+            <CheckBox x:Name="CommentsBox" Content="同时保存评论" IsChecked="False" Click="CommentsChanged"
+                      AutomationProperties.Name="同时保存评论" VerticalAlignment="Center"
+                      ToolTip="评论追加到同一 Markdown，每条视频最多 200 条，包含页面已加载的回复。"/>
+            <TextBlock Text="追加到对应视频的 Markdown，最多 200 条，含已加载回复" Foreground="#536580" Margin="12,0,0,0"/>
+        </StackPanel>
         <Border DockPanel.Dock="Bottom" CornerRadius="8" Background="White" BorderBrush="#DCE4F0" BorderThickness="1" Padding="13" Margin="0,12,0,0">
             <StackPanel>
                 <TextBlock x:Name="StatusLine" TextWrapping="Wrap" MaxHeight="55" Foreground="#314966"
@@ -141,11 +147,11 @@
                             <DataGridTextColumn Header="作品" Binding="{Binding DisplayTitle, Mode=OneWay}" Width="2*" IsReadOnly="True"/>
                             <DataGridTextColumn Header="作品 ID" Binding="{Binding Id, Mode=OneWay}" Width="155" IsReadOnly="True"/>
                             <DataGridTextColumn Header="状态" Binding="{Binding DisplayStatus, Mode=OneWay}" Width="116" IsReadOnly="True"/>
-                            <DataGridTextColumn Header="处理详情" Binding="{Binding Error, Mode=OneWay}" Width="*" IsReadOnly="True">
+                            <DataGridTextColumn Header="处理详情" Binding="{Binding DisplayDetails, Mode=OneWay}" Width="*" IsReadOnly="True">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
-                                        <Setter Property="ToolTip" Value="{Binding Error}"/>
+                                        <Setter Property="ToolTip" Value="{Binding DisplayDetails}"/>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>

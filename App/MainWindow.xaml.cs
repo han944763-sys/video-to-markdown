@@ -48,7 +48,7 @@ public partial class MainWindow : Window
             batchLock?.Dispose();
             platformHttp.Dispose();
             localHttp.Dispose();
-            PlatformView.Dispose();
+            collector.View.Dispose();
         };
     }
 
@@ -60,6 +60,7 @@ public partial class MainWindow : Window
         ProfileBox.Text = batch.Profile;
         FromPicker.SelectedDate = batch.From.ToDateTime(TimeOnly.MinValue);
         ThroughPicker.SelectedDate = batch.Through.ToDateTime(TimeOnly.MinValue);
+        CommentsBox.IsChecked = batch.IncludeComments;
         OutputBox.Text = files?.DirectoryPath ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "视频转 Markdown");
         WorkGrid.ItemsSource = batch.Items;
         Refresh();
@@ -70,13 +71,15 @@ public partial class MainWindow : Window
         WorkGrid.Items.Refresh();
         Totals.Text = $"共 {batch.Items.Count} 条 · 已选 {batch.Items.Count(w => w.Selected)} · 已导出 {batch.Items.Count(w => w.Status == WorkStatus.Succeeded)}";
         ContinueButton.IsEnabled = !busy && batch.Items.Any(w => w.Status == WorkStatus.Running
-            || (w.Selected && w.Status is WorkStatus.Ready or WorkStatus.ExportFailed));
-        RetryButton.IsEnabled = !busy && batch.Items.Any(w => w.Status is WorkStatus.Failed or WorkStatus.ExportFailed or WorkStatus.SubmissionUnknown);
+            || (w.Selected && w.Status is WorkStatus.Ready or WorkStatus.ExportFailed) || TranscriptionQueue.NeedsComments(batch, w));
+        RetryButton.IsEnabled = !busy && batch.Items.Any(w => w.Status is WorkStatus.Failed or WorkStatus.ExportFailed or WorkStatus.SubmissionUnknown
+            || batch.IncludeComments && w.CommentStatus is CommentState.Failed or CommentState.Partial);
         StopCollect.IsEnabled = collectionCancellation is not null;
         PauseButton.IsEnabled = running && !pause;
         SourceForm.IsEnabled = !busy;
         ImportForm.IsEnabled = !busy;
         WorkGrid.IsEnabled = !busy;
+        CommentsBox.IsEnabled = !busy;
         SaveButton.IsEnabled = !busy && batch.Items.Count > 0;
         PlatformBox.IsEnabled = files is null && batch.Items.Count == 0;
         SearchButton.Visibility = PlatformChoice == Platform.Douyin ? Visibility.Visible : Visibility.Collapsed;
@@ -112,6 +115,7 @@ public partial class MainWindow : Window
         batch.Platform = PlatformChoice;
         batch.From = dates.From;
         batch.Through = dates.Through;
+        batch.IncludeComments = CommentsBox.IsChecked == true;
     }
 
     private void UpdateStatus(string message)
@@ -180,14 +184,14 @@ public partial class MainWindow : Window
             throw new FormatException("可在作者主页栏输入抖音号或昵称，再点「查找抖音作者」。");
         Tabs.SelectedItem = BrowserTab;
         await collector.Initialize();
-        PlatformView.CoreWebView2.Navigate($"https://www.douyin.com/search/{Uri.EscapeDataString(query)}?type=user");
+        collector.View.CoreWebView2.Navigate($"https://www.douyin.com/search/{Uri.EscapeDataString(query)}?type=user");
         UpdateStatus("在抖音页面核对账号并打开作者主页，再点「使用当前主页」。");
     });
 
     private async void OpenPlatform(object sender, RoutedEventArgs e) => await Guard(async () =>
     {
         await collector.Initialize();
-        PlatformView.CoreWebView2.Navigate(PlatformChoice switch
+        collector.View.CoreWebView2.Navigate(PlatformChoice switch
         {
             Platform.Bilibili => "https://www.bilibili.com/",
             Platform.Douyin => "https://www.douyin.com/",
@@ -198,7 +202,7 @@ public partial class MainWindow : Window
 
     private async void UseCurrentProfile(object sender, RoutedEventArgs e) => await Guard(() =>
     {
-        if (PlatformView.Source is not { } source)
+        if (collector.View.Source is not { } source)
             throw new FormatException("平台页面还没有打开作者主页。");
         var profile = Works.Profile(PlatformChoice, source);
         if (files is not null && batch.Profile.Length > 0 && !SameProfile(profile.Page))
@@ -427,7 +431,7 @@ public partial class MainWindow : Window
         EnsureSaved();
         Tabs.SelectedItem = ListTab;
         await UpdateHealth();
-        await new TranscriptionQueue(service, TimeSpan.FromSeconds(2))
+        await new TranscriptionQueue(service, TimeSpan.FromSeconds(2), ReadComments)
             .Run(batch, files!, collector.Credentials, () => pause, UpdateStatus, lifetime.Token);
     }
 
@@ -454,10 +458,33 @@ public partial class MainWindow : Window
                 work.Selected = true;
             }
             if (work.Status == WorkStatus.ExportFailed) work.Selected = true;
+            if (batch.IncludeComments && work.CommentStatus is CommentState.Failed or CommentState.Partial)
+            {
+                work.CommentStatus = CommentState.None;
+                work.Selected = true;
+            }
         }
         files.Save(batch);
         await Run();
     }, true);
+
+    private async Task<CommentSnapshot> ReadComments(Work work, Action<string> update, CancellationToken token)
+    {
+        Tabs.SelectedItem = BrowserTab;
+        try { return await collector.ReadComments(work, update, token); }
+        finally { if (!lifetime.IsCancellationRequested) Tabs.SelectedItem = ListTab; }
+    }
+
+    private void CommentsChanged(object sender, RoutedEventArgs e)
+    {
+        batch.IncludeComments = CommentsBox.IsChecked == true;
+        try { files?.Save(batch); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            StatusLine.Text = $"保存选项失败 · {VideoToNo.SafeError(error.Message)}";
+        }
+        Refresh();
+    }
 
     private void ToggleWork(object sender, RoutedEventArgs e)
     {

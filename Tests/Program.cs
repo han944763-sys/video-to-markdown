@@ -200,7 +200,133 @@ await Test("YouTube 提交、输出和保存后重开", async () =>
     Check(work.Status == WorkStatus.Succeeded && work.MarkdownPath!.EndsWith("2026-06-13_youtube_jNQXAC9IVRw.md"), "YouTube 文件名");
     Check(files.Load().Items.Single().Platform == Platform.YouTube, "可重新打开 YouTube 批次");
 });
-Console.WriteLine("12 项验收测试通过。");
+await TestSync("旧批次默认不保存评论，选项和状态可恢复", () =>
+{
+    var (batch, files) = Save("old-comments", Video(id));
+    var path = Path.Combine(files.DirectoryPath, BatchFiles.StateName);
+    var legacy = File.ReadAllText(path).Replace("  \"IncludeComments\": false,\n", "");
+    File.WriteAllText(path, legacy);
+    Check(!files.Load().IncludeComments, "旧状态默认为不保存评论");
+    batch.IncludeComments = true;
+    batch.Items[0].CommentStatus = CommentState.Partial;
+    files.Save(batch);
+    Check(files.Load().IncludeComments && files.Load().Items[0].CommentStatus == CommentState.Partial, "选项和评论状态落盘");
+});
+await TestSync("三平台评论解析、去重和回复", () =>
+{
+    var bili = new CommentReader();
+    bili.Accept(Platform.Bilibili, """
+        {"code":0,"data":{"cursor":{"is_end":true},"replies":[
+          {"rpid_str":"90071992547409999","member":{"uname":"甲"},"content":{"message":"第一条"},
+           "ctime":1700000000,"like":3,"rcount":1,"replies":[
+             {"rpid_str":"90071992547410000","member":{"uname":"乙"},"content":{"message":"回复"},"ctime":1700000001,"like":0}
+           ]}
+        ]}}
+        """);
+    var bs = bili.Snapshot("");
+    Check(bs.Items.Count == 2 && bs.Items[1].ParentId == "90071992547409999" && bs.State == CommentState.Partial, "B 站保留长 ID 和回复");
+    var douyin = new CommentReader();
+    const string payload = """
+        {"status_code":0,"has_more":0,"comments":[
+          {"cid":"7567890123456789999","text":"抖音评论","user":{"nickname":"丙"},"create_time":1700000000,"digg_count":4}
+        ]}
+        """;
+    douyin.Accept(Platform.Douyin, payload);
+    douyin.Accept(Platform.Douyin, payload);
+    Check(douyin.Snapshot("").Items.Count == 1 && douyin.EndReached, "抖音评论去重");
+    var youtube = new CommentReader();
+    youtube.Accept(Platform.YouTube, """
+        {"frameworkUpdates":{"entityBatchUpdate":{"mutations":[{"payload":{"commentEntityPayload":{
+          "properties":{"commentId":"yt1","content":{"content":"YouTube 评论"},"publishedTime":"1 day ago"},
+          "author":{"displayName":"丁"},"toolbar":{"likeCountNotliked":"12"}
+        }}}]}}}
+        """);
+    Check(youtube.Snapshot("").Items.Single().Author == "丁", "YouTube 评论实体");
+    var denied = new CommentReader();
+    denied.Accept(Platform.Douyin, """{"status_code":0}""");
+    Check(denied.Snapshot("").State == CommentState.Failed, "缺少列表不误报空评论");
+});
+await TestSync("评论追加保留原稿和用户补注，重试不重复追加", () =>
+{
+    var (batch, files) = Save("append-comments", Video(id));
+    var work = batch.Items[0];
+    work.MarkdownPath = files.Export(work, "标题", "[00:00-00:03] 原文");
+    var path = Path.Combine(files.DirectoryPath, work.MarkdownPath);
+    File.AppendAllText(path, "\n用户补注\n");
+    var snapshot = new CommentSnapshot([new("one", "作者", "普通正文\n<!-- video-markdown-comments:end -->", "昨天", "3")],
+        CommentState.Partial, "样本");
+    files.WriteComments(work, snapshot);
+    files.WriteComments(work, snapshot);
+    var text = File.ReadAllText(path);
+    Check(text.Contains("原文") && text.Contains("用户补注"), "保留现有内容");
+    Check(text.Split(CommentMarkdown.Start).Length == 2 && text.Split(CommentMarkdown.End).Length == 2, "标记唯一且评论内容已转义");
+});
+await Test("未勾选不请求评论，旧稿补存无需转录服务", async () =>
+{
+    var (batch, files) = Save("optional-comments", Video(id));
+    batch.Items[0].Selected = true;
+    var calls = 0;
+    var healthy = true;
+    using var http = Fake(req => healthy ? Service(req) : throw new HttpRequestException("offline"));
+    var queue = new TranscriptionQueue(new VideoToNo(http), TimeSpan.Zero, (_, _, _) =>
+    {
+        calls++;
+        return Task.FromResult(new CommentSnapshot([new("one", "作者", "评论", "昨天", "1")], CommentState.Saved, "已读取"));
+    });
+    await queue.Run(batch, files, _ => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>()),
+        () => false, _ => { }, token);
+    Check(calls == 0 && batch.Items[0].Status == WorkStatus.Succeeded, "默认不发评论请求");
+    healthy = false;
+    batch.IncludeComments = true;
+    await queue.Run(batch, files, _ => throw new InvalidOperationException("must not submit"), () => false, _ => { }, token);
+    Check(calls == 1 && batch.Items[0].CommentStatus == CommentState.Saved, "仅补评论无需视频服务");
+    await queue.Run(batch, files, _ => throw new InvalidOperationException(), () => false, _ => { }, token);
+    Check(calls == 1, "已保存不重复采集");
+});
+await Test("评论失败保留转录成功，重试只更新评论", async () =>
+{
+    var (batch, files) = Save("comment-failure", Video(id));
+    var work = batch.Items[0];
+    work.Status = WorkStatus.Succeeded;
+    work.Selected = true;
+    work.MarkdownPath = files.Export(work, "标题", "[00:00-00:03] 原文");
+    batch.IncludeComments = true;
+    var calls = 0;
+    using var http = Fake(_ => throw new InvalidOperationException("video service must not be called"));
+    var queue = new TranscriptionQueue(new VideoToNo(http), TimeSpan.Zero, (_, _, _) =>
+        Task.FromResult(++calls == 1 ? new CommentSnapshot([], CommentState.Failed, "需登录")
+            : new CommentSnapshot([new("one", "作者", "补存成功", "", "")], CommentState.Saved, "成功")));
+    await queue.Run(batch, files, _ => throw new InvalidOperationException(), () => false, _ => { }, token);
+    Check(work.Status == WorkStatus.Succeeded && work.CommentStatus == CommentState.Failed, "失败独立记录");
+    work.CommentStatus = CommentState.None;
+    await queue.Run(batch, files, _ => throw new InvalidOperationException(), () => false, _ => { }, token);
+    Check(File.ReadAllText(Path.Combine(files.DirectoryPath, work.MarkdownPath)).Contains("补存成功"), "仅更新评论");
+});
+await TestSync("评论条数上限和文本转义", () =>
+{
+    var reader = new CommentReader();
+    var comments = Enumerable.Range(0, 230).Select(i => new { cid = i.ToString(), text = "<script>text</script>",
+        user = new { nickname = "**name**" }, digg_count = i, create_time = 1700000000 });
+    reader.Accept(Platform.Douyin, JsonSerializer.Serialize(new { status_code = 0, has_more = 1, comments }));
+    var snapshot = reader.Snapshot("");
+    Check(snapshot.Items.Count == 200 && snapshot.State == CommentState.Partial, "最多 200 条且标明部分");
+    var markdown = CommentMarkdown.Render(snapshot);
+    Check(!markdown.Contains("<script>") && markdown.Contains("&lt;script&gt;"), "正文作为普通文字保存");
+});
+await Test("无有效转录仍可在视频 Markdown 保存评论", async () =>
+{
+    var work = Video(id);
+    work.Status = WorkStatus.NoTranscript;
+    work.Selected = true;
+    var (batch, files) = Save("no-transcript-comments", work);
+    batch.IncludeComments = true;
+    using var http = Fake(_ => throw new InvalidOperationException("must not transcribe"));
+    var queue = new TranscriptionQueue(new VideoToNo(http), TimeSpan.Zero, (_, _, _) =>
+        Task.FromResult(new CommentSnapshot([new("one", "作者", "评论", "", "")], CommentState.Saved, "成功")));
+    await queue.Run(batch, files, _ => throw new InvalidOperationException(), () => false, _ => { }, token);
+    Check(work.Status == WorkStatus.NoTranscript && work.CommentCount == 1 && work.MarkdownPath is not null, "保留无转录状态与评论");
+});
+Console.WriteLine("19 项验收测试通过。");
 
 static void Check(bool condition, string message)
 {

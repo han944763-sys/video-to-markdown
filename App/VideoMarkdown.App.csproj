@@ -7,6 +7,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>视频转Markdown</AssemblyName>
     <RootNamespace>VideoMarkdown.App</RootNamespace>
+    <Version>0.3.0</Version>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
   </PropertyGroup>
   <ItemGroup>

@@ -76,12 +76,18 @@ public sealed class VideoToNo(HttpClient http)
     }
 }
 
-public sealed class TranscriptionQueue(VideoToNo service, TimeSpan pollInterval)
+public sealed class TranscriptionQueue(VideoToNo service, TimeSpan pollInterval,
+    Func<Work, Action<string>, CancellationToken, Task<CommentSnapshot>>? readComments = null)
 {
+    public static bool NeedsComments(Batch batch, Work work) => batch.IncludeComments && work.Selected
+        && work.Status is WorkStatus.Succeeded or WorkStatus.NoTranscript && work.CommentStatus == CommentState.None;
+
     public async Task Run(Batch batch, BatchFiles files, Func<Platform, Task<IReadOnlyDictionary<string, string>>> credentials,
         Func<bool> pause, Action<string> update, CancellationToken token)
     {
-        if (!await service.Healthy(token))
+        if (batch.Items.Any(work => work.Status == WorkStatus.Running
+                || work.Selected && work.Status is WorkStatus.Ready or WorkStatus.ExportFailed)
+            && !await service.Healthy(token))
         {
             update("VideoToNo 1.4.7 暂不可用。启动后点「继续」。");
             return;
@@ -90,7 +96,8 @@ public sealed class TranscriptionQueue(VideoToNo service, TimeSpan pollInterval)
         {
             if (pause()) break;
             token.ThrowIfCancellationRequested();
-            if (work.Status != WorkStatus.Running && (!work.Selected || work.Status is not (WorkStatus.Ready or WorkStatus.ExportFailed)))
+            if (!NeedsComments(batch, work) && work.Status != WorkStatus.Running
+                && (!work.Selected || work.Status is not (WorkStatus.Ready or WorkStatus.ExportFailed)))
                 continue;
             if (work.Status == WorkStatus.Ready)
             {
@@ -132,26 +139,52 @@ public sealed class TranscriptionQueue(VideoToNo service, TimeSpan pollInterval)
                 }
                 files.Save(batch);
             }
-            if (work.Status is not (WorkStatus.Running or WorkStatus.ExportFailed)) continue;
-            try
+            if (work.Status is WorkStatus.Running or WorkStatus.ExportFailed)
             {
-                await Retrieve(work, files, update, token);
-            }
-            catch (Exception error) when (error is HttpRequestException or JsonException
-                || (error is OperationCanceledException && !token.IsCancellationRequested))
-            {
-                work.Error = "读取转录服务失败，队列已保留。连接恢复后点「继续」。";
+                try { await Retrieve(work, files, update, token); }
+                catch (Exception error) when (error is HttpRequestException or JsonException
+                    || (error is OperationCanceledException && !token.IsCancellationRequested))
+                {
+                    work.Error = "读取转录服务失败，队列已保留。连接恢复后点「继续」。";
+                    files.Save(batch);
+                    update(work.Error);
+                    return;
+                }
                 files.Save(batch);
-                update(work.Error);
-                return;
             }
+            if (NeedsComments(batch, work)) await SaveComments(work, files, update, token);
             files.Save(batch);
             update($"{work.DisplayStatus} · {work.DisplayTitle}");
         }
         update(pause() ? "已暂停，点「继续」可恢复。" :
             $"本轮处理结束 · 已导出 {batch.Items.Count(w => w.Status == WorkStatus.Succeeded)} 条 · " +
             $"无有效转录 {batch.Items.Count(w => w.Status == WorkStatus.NoTranscript)} 条 · " +
-            $"失败 {batch.Items.Count(w => w.Status is WorkStatus.Failed or WorkStatus.ExportFailed or WorkStatus.SubmissionUnknown)} 条");
+            $"失败 {batch.Items.Count(w => w.Status is WorkStatus.Failed or WorkStatus.ExportFailed or WorkStatus.SubmissionUnknown)} 条" +
+            (batch.IncludeComments ? $" · 评论已保存 {batch.Items.Count(w => w.CommentStatus is CommentState.Saved or CommentState.Partial)} 条视频" : ""));
+    }
+
+    private async Task SaveComments(Work work, BatchFiles files, Action<string> update, CancellationToken token)
+    {
+        try
+        {
+            if (readComments is null) throw new InvalidOperationException("评论采集器未就绪。");
+            update($"正在保存评论 · {work.DisplayTitle}");
+            var snapshot = await readComments(work, update, token);
+            token.ThrowIfCancellationRequested();
+            if (work.MarkdownPath is null && work.Status == WorkStatus.NoTranscript)
+                work.MarkdownPath = files.Export(work, work.DisplayTitle, "本视频未取得有效的带时间戳转录。");
+            files.WriteComments(work, snapshot);
+            work.CommentStatus = snapshot.State;
+            work.CommentCount = snapshot.Items.Count;
+            work.CommentNotice = $"评论 {snapshot.Items.Count} 条 · {snapshot.Notice}";
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or HttpRequestException
+            or JsonException or InvalidOperationException or System.Runtime.InteropServices.COMException
+            || error is OperationCanceledException && !token.IsCancellationRequested)
+        {
+            work.CommentStatus = CommentState.Failed;
+            work.CommentNotice = $"评论保存失败 · {VideoToNo.SafeError(error.Message)}";
+        }
     }
 
     private async Task Retrieve(Work work, BatchFiles files, Action<string> update, CancellationToken token)

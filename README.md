@@ -12,15 +12,18 @@
 - **多位博主分别建批次**。每批有自己的输出目录、作品清单和处理进度，适合分开归档和后续补录。一个批次对应一个平台，可为不同博主重复建批次。
 - **每条作品单独留稿**。Markdown 保留标题、原视频链接、发布日期和转录时间戳，便于搜索、引用和回看原片。
 - **批次可恢复**。可以处理完当前条后暂停，重新打开批次继续，或按清单重试失败项。手头已有链接时，也可以粘贴多条链接或导入 CSV。
+- **评论可选保存**。勾选「同时保存评论」，在同一 Markdown 的转录稿末尾记录评论和已加载的回复。
 
 ## 下载与使用
 
-1. 从 [GitHub Releases](https://github.com/han944763-sys/video-to-markdown/releases/latest) 下载 `VideoToMarkdown-v0.2.0-win-x64.zip`，解压并双击 `视频转Markdown.exe`。Windows 需要 Edge WebView2 Runtime，便携包已包含 .NET 运行时。
+1. 从 [GitHub Releases](https://github.com/han944763-sys/video-to-markdown/releases/latest) 下载 `VideoToMarkdown-v0.3.0-win-x64.zip`，解压并双击 `视频转Markdown.exe`。Windows 需要 Edge WebView2 Runtime，便携包已包含 .NET 运行时。
 2. 安装并启动 [VideoToNo 1.4.7](https://github.com/like-attract/video-to-note/releases/tag/v1.4.7)。程序连接 `127.0.0.1:8000`，也可以点「启动 VideoToNo」选择本机 EXE。转录优先使用可用字幕，没有字幕时走本机语音识别，默认使用 `base` 模型。
 3. 选择平台，输入博主主页，设置日期和输出目录，再点「采集主页」。日期按北京时间判断，包含首尾两天。也可按作品链接导入，CSV 需要 `url` 列，可加 `published_date`（`YYYY-MM-DD`）和 `title`。
 4. 核对清单后点「开始 / 继续」。日期待确认的作品可手动勾选。输出目录包含 `批次状态.json`、`作品清单.csv` 和每条作品的 `转录稿/*.md`。恢复时用「打开批次」选择原状态文件。
 
 平台可能要求登录或验证，可在内嵌的「平台页面」操作。出现「采集未完整」时，已找到的作品仍可转录，遗漏项可通过链接补录。YouTube 每个标签最多采集 25 页。对于依赖画面表达的作品，建议结合原片和时间戳使用转录稿。
+
+评论选项默认留空，勾选后逐条打开视频页面，按页面加载顺序保存最多 200 条评论，包括作者、时间、点赞数和已加载的回复。采集时间、条数及加载不完整的原因会写入「视频评论」段落。旧批次也可勾选并点击「开始 / 继续」补存评论。评论失败或只保存了部分评论时，可用「重试失败项」重新获取。
 
 ## 从源码构建
 

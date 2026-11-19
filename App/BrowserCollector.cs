@@ -2,6 +2,8 @@ using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Controls;
+using System.Runtime.InteropServices;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 
@@ -22,6 +24,14 @@ internal sealed class BrowserCollector(WebView2 browser, HttpClient http)
 
     public static string ProfileDirectory { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VideoMarkdown", "WebView2");
+    private static string RecoveryProfile => ProfileDirectory + "-recovered";
+    public WebView2 View => browser;
+
+    public async Task<CommentSnapshot> ReadComments(Work work, Action<string> update, CancellationToken token)
+    {
+        await Initialize();
+        return await new BrowserComments(web!, http).Read(work, update, token);
+    }
 
     public async Task<CollectionResult> Collect(Platform source, Uri page, string authorId, DateOnly from,
         DateOnly through, Action<string> changed, CancellationToken token)
@@ -38,8 +48,33 @@ internal sealed class BrowserCollector(WebView2 browser, HttpClient http)
 
     public async Task Initialize()
     {
-        if (web is not null) return;
-        var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: ProfileDirectory);
+        if (web is not null)
+        {
+            try { _ = web.Source; return; }
+            catch (COMException) { ResetBrowser(); }
+        }
+        try { await InitializeCore(Directory.Exists(RecoveryProfile) ? RecoveryProfile : ProfileDirectory); }
+        catch (COMException error) when (error.HResult == unchecked((int)0x80010108))
+        {
+            ResetBrowser();
+            await InitializeCore(RecoveryProfile);
+        }
+    }
+
+    private void ResetBrowser()
+    {
+        var parent = browser.Parent as Panel ?? throw new InvalidOperationException("平台页面尚未就绪。");
+        var index = parent.Children.IndexOf(browser);
+        parent.Children.Remove(browser);
+        browser.Dispose();
+        browser = new WebView2();
+        parent.Children.Insert(index, browser);
+        web = null;
+    }
+
+    private async Task InitializeCore(string profileDirectory)
+    {
+        var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: profileDirectory);
         await browser.EnsureCoreWebView2Async(environment);
         var core = browser.CoreWebView2;
         core.Settings.IsWebMessageEnabled = false;

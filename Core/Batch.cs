@@ -12,6 +12,7 @@ public sealed class Batch
     public DateOnly From { get; set; } = Works.BeijingToday.AddMonths(-5);
     public DateOnly Through { get; set; } = Works.BeijingToday;
     public string CollectionStatus { get; set; } = "";
+    public bool IncludeComments { get; set; }
     public List<Work> Items { get; init; } = [];
 }
 
@@ -57,11 +58,12 @@ public sealed class BatchFiles(string directory)
 
     private void SaveCsv(Batch batch)
     {
-        var csv = new StringBuilder("platform,video_id,published_date,title,url,selected,status,task_id,md_path,error\r\n");
+        var csv = new StringBuilder("platform,video_id,published_date,title,url,selected,status,task_id,md_path,error,comment_status,comment_count,comment_notice\r\n");
         foreach (var work in batch.Items)
         {
             string?[] fields = [work.PlatformName, work.Id, work.Published?.ToString("yyyy-MM-dd"), work.Title, work.Url,
-                work.Selected ? "1" : "0", work.DisplayStatus, work.TaskId, work.MarkdownPath, work.Error];
+                work.Selected ? "1" : "0", work.DisplayStatus, work.TaskId, work.MarkdownPath, work.Error,
+                work.CommentStatus.ToString(), work.CommentCount.ToString(), work.CommentNotice];
             csv.AppendLine(string.Join(',', fields.Select(Quote)));
         }
         AtomicWrite(Path.Combine(DirectoryPath, "作品清单.csv"), csv.ToString(), new UTF8Encoding(true));
@@ -87,13 +89,39 @@ public sealed class BatchFiles(string directory)
         return relative;
     }
 
+    public void WriteComments(Work work, CommentSnapshot snapshot)
+    {
+        if (work.MarkdownPath is not { } relative || Path.IsPathFullyQualified(relative))
+            throw new IOException("找不到对应视频的 Markdown 路径。");
+        var target = Path.GetFullPath(Path.Combine(DirectoryPath, relative));
+        var folder = Path.Combine(DirectoryPath, "转录稿") + Path.DirectorySeparatorChar;
+        if (!target.StartsWith(folder, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("视频 Markdown 路径超出批次转录目录。");
+        var original = File.ReadAllText(target);
+        var start = original.IndexOf(CommentMarkdown.Start, StringComparison.Ordinal);
+        var end = original.IndexOf(CommentMarkdown.End, StringComparison.Ordinal);
+        var section = CommentMarkdown.Render(snapshot);
+        string updated;
+        if (start < 0 && end < 0) updated = original.TrimEnd() + "\n\n" + section;
+        else
+        {
+            if (start < 0 || end < start
+                || original.IndexOf(CommentMarkdown.Start, start + CommentMarkdown.Start.Length, StringComparison.Ordinal) >= 0
+                || original.IndexOf(CommentMarkdown.End, end + CommentMarkdown.End.Length, StringComparison.Ordinal) >= 0)
+                throw new IOException("已有评论段落标记不完整，请检查 Markdown 后重试。");
+            updated = original[..start] + section.TrimEnd() + original[(end + CommentMarkdown.End.Length)..];
+        }
+        AtomicWrite(target, updated);
+    }
+
     private static string SingleLine(string value) => string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
     private static string Quote(string? value) => $"\"{(value ?? "").Replace("\"", "\"\"")}\"";
 
     private static bool IsValidWork(Work work)
     {
         var normalized = Works.FromUrl(work.Platform, Works.ParseUrl(work.Url), null, "");
-        return Enum.IsDefined(work.Status) && normalized.Url == work.Url && normalized.Id == work.Id;
+        return Enum.IsDefined(work.Status) && Enum.IsDefined(work.CommentStatus) && work.CommentCount >= 0
+            && normalized.Url == work.Url && normalized.Id == work.Id;
     }
 
     private static void AtomicWrite(string file, string text, Encoding? encoding = null, bool replace = true)
